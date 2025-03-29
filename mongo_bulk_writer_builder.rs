@@ -31,18 +31,19 @@
 use mongodb::{
     bson::{Document, to_document, Bson,doc},
     Collection,
-    options::{WriteModel, UpdateOneModel, DeleteOneModel, DeleteManyModel, InsertOneModel, UpdateModifications},
+    options::{WriteModel, UpdateOneModel, DeleteOneModel, 
+        DeleteManyModel, InsertOneModel, UpdateModifications},
     action::BulkWrite,
-    results::SummaryBulkWriteResult,
-    Client,
+    results::SummaryBulkWriteResult
 };
 use serde::{Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Clone)]
-pub enum WriteOperation<T>
-where
-    T: Serialize + DeserializeOwned + Unpin + Send + Sync + 'static,
-{
+pub enum WriteOperation<T> where
+                            T: Serialize + 
+                            DeserializeOwned + 
+                            Unpin + Send + Sync + 
+                            'static {
     UpdateOne {
         filter: Document,
         updates: Vec<UpdateType>,  // 存储 UpdateType 而不是 Document
@@ -529,13 +530,20 @@ impl UpdateType {
     }
 }
 
+struct BatchUpdateContext{
+    filter: Document,
+    updates: Vec<UpdateType>,
+    is_upsert: bool,
+}
+
 pub struct BatchUpdateBuilder<T>
 where
     T: Serialize + DeserializeOwned + Unpin + Send + Sync + 'static,
 {
-    collection: Collection<T>,
     operations: Vec<WriteOperation<T>>,
     ordered: bool,
+    current_context: Option<BatchUpdateContext>,
+    collection: Collection<T>,
 }
 
 impl<T> BatchUpdateBuilder<T>
@@ -544,16 +552,32 @@ where
 {
     pub fn new(collection: Collection<T>) -> Self {
         Self {
-            collection,
             operations: Vec::new(),
             ordered: true,
+            current_context: None,
+            collection: collection,
         }
     }
+    
 
     pub fn ordered(mut self, ordered: bool) -> Self {
         self.ordered = ordered;
         self
     }
+
+    fn commit_context(&mut self) {
+        if let Some(context) = self.current_context.take() {
+            if !context.updates.is_empty() {
+                self.operations.push(WriteOperation::UpdateOne {
+                    filter: context.filter,
+                    updates: context.updates,
+                    upsert: context.is_upsert,
+                });
+            }
+        }
+    }
+
+
 
     fn documents_equal(doc1: &Document, doc2: &Document) -> bool {
         if doc1.len() != doc2.len() {
@@ -569,8 +593,11 @@ where
         true
     }
 
-    pub fn add_update(mut self, filter: Document) -> BatchUpdateContext<T> {
-        // 查找并移除匹配的操作
+    pub fn add_update(&mut self, filter: Document) -> &mut Self {
+        // 提交当前上下文
+        self.commit_context();
+
+        // 查找是否存在相同filter的操作
         let existing_update = self.operations.iter()
             .position(|op| {
                 if let WriteOperation::UpdateOne { filter: existing_filter, .. } = op {
@@ -581,94 +608,253 @@ where
             })
             .map(|index| self.operations.remove(index));
 
-        match existing_update {
-            Some(WriteOperation::UpdateOne { updates, upsert, .. }) => {
-                // 如果找到匹配的操作，创建新的 context 并继承现有的 updates
-                BatchUpdateContext {
-                    builder: self,
-                    current_filter: filter,
-                    current_updates: updates,
-                    is_upsert: upsert,
-                }
+        // 根据查找结果创建新的上下文
+        self.current_context = Some(match existing_update {
+            Some(WriteOperation::UpdateOne { updates, upsert, .. }) => BatchUpdateContext {
+                filter,
+                updates,  // 使用已存在的updates
+                is_upsert: upsert,
+            },
+            _ => BatchUpdateContext {
+                filter,
+                updates: Vec::new(),
+                is_upsert: false,
             }
-            _ => {
-                // 如果没有找到匹配的操作，创建新的 context
-        BatchUpdateContext {
-            builder: self,
-            current_filter: filter,
-            current_updates: Vec::new(),
-            is_upsert: false,
-                }
-            }
-        }
+        });
+
+        self
     }
 
-    pub fn execute(&self) -> BulkWrite<'_, SummaryBulkWriteResult> {
+    pub fn set(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Set(doc));
+        }
+        self
+    }
+
+    pub fn unset(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Unset(doc));
+        }
+        self
+    }
+
+    pub fn set_on_insert(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::SetOnInsert(doc));
+        }
+        self
+    }
+
+    pub fn push(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Push(doc));
+        }
+        self
+    }
+
+    pub fn push_each(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::PushEach(doc));
+        }
+        self
+    }
+
+    pub fn pull(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Pull(doc));
+        }
+        self
+    }
+
+    pub fn pull_all(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::PullAll(doc));
+        }
+        self
+    }
+
+    pub fn pop(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Pop(doc));
+        }
+        self
+    }
+
+    pub fn add_to_set(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::AddToSet(doc));
+        }
+        self
+    }
+
+    pub fn add_to_set_each(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::AddToSetEach(doc));
+        }
+        self
+    }
+
+    pub fn inc(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Inc(doc));
+        }
+        self
+    }
+
+    pub fn mul(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Mul(doc));
+        }
+        self
+    }
+
+    pub fn min(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Min(doc));
+        }
+        self
+    }
+
+    pub fn max(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Max(doc));
+        }
+        self
+    }
+
+    pub fn rename(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Rename(doc));
+        }
+        self
+    }
+
+    pub fn current_date(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::CurrentDate(doc));
+        }
+        self
+    }
+
+    pub fn bit(&mut self, doc: Document) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.add_update_type(UpdateType::Bit(doc));
+        }
+        self
+    }
+
+    pub fn upsert(&mut self, upsert: bool) -> &mut Self {
+        if let Some(context) = &mut self.current_context {
+            context.is_upsert = upsert;
+        }
+        self
+    }
+
+    pub fn delete(&mut self, filter: Document) -> &mut Self {
+        self.commit_context();
+        self.operations.push(WriteOperation::DeleteOne { filter });
+        self
+    }
+
+    pub fn delete_many(&mut self, filter: Document) -> &mut Self {
+        self.commit_context();
+        self.operations.push(WriteOperation::DeleteMany { filter });
+        self
+    }
+
+    pub fn insert(&mut self, document: T) -> &mut Self {
+        self.commit_context();
+        self.operations.push(WriteOperation::InsertOne { document });
+        self
+    }
+
+    pub fn build(&mut self) -> &mut Self {
+        self.commit_context();
+        self
+    }
+ 
+        /*
+        filter_map 的工作方式是：
+        对每个元素应用转换函数
+        如果函数返回 Some(x)，则保留值 x
+        如果函数返回 None，则跳过该元素
+        所以：
+        空的过滤条件（filter.is_empty()）会返回 None
+        没有更新操作的更新（updates.is_empty()）会返回 None
+        这些 None 值会被 filter_map 自动过滤掉
+        最终的 write_models 只包含有效的操作
+        这是一个安全的实现，可以防止意外的全表更新或删除操作。
+     */
+    pub fn execute(&mut self) -> BulkWrite<SummaryBulkWriteResult> {
+        self.build();
+        // 原有的 execute 实现保持不变
         let write_models: Vec<WriteModel> = self.operations.iter()
-            .map(|operation| match operation {
+            .filter_map(|operation| match operation {
                 WriteOperation::UpdateOne { filter, updates, upsert } => {
-                    let mut update_doc = Document::new();
-                    for update in updates {
-                        let doc = update.to_document();
-                        for (k, v) in doc.iter() {
-                            update_doc.insert(k, v.clone());
+                    // 如果 filter为{} 则不进行更新，因为这是一个破坏性极大的操作，会把整个表的数据都更新，这种操作要禁止
+                    if !filter.is_empty() && !updates.is_empty() {
+                        let mut update_doc = Document::new();
+                        for update in updates {
+                            let doc = update.to_document();
+                            for (k, v) in doc.iter() {
+                                update_doc.insert(k, v.clone());
+                            }
                         }
+                        
+                        Some(UpdateOneModel::builder()
+                            .namespace(self.collection.namespace())
+                            .filter(filter.clone())
+                            .update(UpdateModifications::Document(update_doc))
+                            .upsert(Some(*upsert))
+                            .build()
+                            .into())
+                    } else {
+                        None
                     }
-                    
-                    UpdateOneModel::builder()
-                        .namespace(self.collection.namespace())
-                        .filter(filter.clone())
-                        .update(UpdateModifications::Document(update_doc))
-                        .upsert(Some(*upsert))
-                        .build()
-                        .into()
                 },
                 WriteOperation::DeleteOne { filter } => {
-                    DeleteOneModel::builder()
-                        .namespace(self.collection.namespace())
-                        .filter(filter.clone())
-                        .build()
-                        .into()
+                    if !filter.is_empty() {
+                        Some(DeleteOneModel::builder()
+                            .namespace(self.collection.namespace())
+                            .filter(filter.clone())
+                            .build()
+                            .into())
+                    } else {
+                        None
+                    }
                 },
                 WriteOperation::DeleteMany { filter } => {
-                    DeleteManyModel::builder()
-                        .namespace(self.collection.namespace())
-                        .filter(filter.clone())
-                        .build()
-                        .into()
+                    if !filter.is_empty() {
+                        Some(DeleteManyModel::builder()
+                            .namespace(self.collection.namespace())
+                            .filter(filter.clone())
+                            .build()
+                            .into())
+            } else {
+                None
+                    }
                 },
                 WriteOperation::InsertOne { document } => {
-                    InsertOneModel::builder()
+                    Some(InsertOneModel::builder()
                         .namespace(self.collection.namespace())
                         .document(to_document(document).unwrap())
                         .build()
-                        .into()
+                        .into())
                 },
             })
             .collect();
 
         self.collection.client().bulk_write(write_models)
     }
+  
 }
 
-pub struct BatchUpdateContext<T>
-where
-    T: Serialize + DeserializeOwned + Unpin + Send + Sync + 'static,
-{
-    builder: BatchUpdateBuilder<T>,
-    current_filter: Document,
-    current_updates: Vec<UpdateType>,
-    is_upsert: bool,
-}
-
-impl<T> BatchUpdateContext<T>
-where
-    T: Serialize + DeserializeOwned + Unpin + Send + Sync + 'static,
-{
+impl BatchUpdateContext{
     fn add_update_type(&mut self, new_update: UpdateType) {
         // 尝试合并相同类型的操作
         let mut merged = false;
-        for existing_update in &mut self.current_updates {
+        for existing_update in &mut self.updates {
             if let Some(merged_update) = existing_update.merge(&new_update) {
                 *existing_update = merged_update;
                 merged = true;
@@ -677,177 +863,19 @@ where
         }
         
         if !merged {
-            self.current_updates.push(new_update);
+            self.updates.push(new_update);
         }
-    }
-
-    pub fn set(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Set(doc));
-        self
-    }
-
-    pub fn unset(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Unset(doc));
-        self
-    }
-
-    pub fn set_on_insert(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::SetOnInsert(doc));
-        self
-    }
-
-    pub fn push(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Push(doc));
-        self
-    }
-
-    pub fn push_each(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::PushEach(doc));
-        self
-    }
-
-    pub fn pull(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Pull(doc));
-        self
-    }
-
-    pub fn pull_all(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::PullAll(doc));
-        self
-    }
-
-    pub fn pop(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Pop(doc));
-        self
-    }
-
-    pub fn add_to_set(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::AddToSet(doc));
-        self
-    }
-
-    pub fn add_to_set_each(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::AddToSetEach(doc));
-        self
-    }
-
-    pub fn inc(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Inc(doc));
-        self
-    }
-
-    pub fn mul(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Mul(doc));
-        self
-    }
-
-    pub fn min(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Min(doc));
-        self
-    }
-
-    pub fn max(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Max(doc));
-        self
-    }
-
-    pub fn rename(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Rename(doc));
-        self
-    }
-
-    pub fn current_date(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::CurrentDate(doc));
-        self
-    }
-
-    pub fn bit(mut self, doc: Document) -> Self {
-        self.add_update_type(UpdateType::Bit(doc));
-        self
-    }
-
-    pub fn upsert(mut self, upsert: bool) -> Self {
-        self.is_upsert = upsert;
-        self
-    }
-
-    pub fn delete(mut self) -> BatchUpdateBuilder<T> {
-        self.builder.operations.push(WriteOperation::DeleteOne {
-            filter: self.current_filter,
-        });
-        self.builder
-    }
-
-    pub fn delete_many(mut self) -> BatchUpdateBuilder<T> {
-        self.builder.operations.push(WriteOperation::DeleteMany {
-            filter: self.current_filter,
-        });
-        self.builder
-    }
-
-    pub fn insert(mut self, doc: T) -> BatchUpdateBuilder<T> {
-        self.builder.operations.push(WriteOperation::InsertOne {
-            document: doc,
-        });
-        self.builder
-    }
-
-    pub fn next_update(mut self, filter: Document) -> Self {
-        if !self.current_updates.is_empty() {
-            self.builder.operations.push(WriteOperation::UpdateOne {
-                filter: self.current_filter,
-                updates: self.current_updates,
-                upsert: self.is_upsert,
-            });
-        }
-
-        // 查找是否存在匹配的操作
-        let existing_update = self.builder.operations.iter()
-            .position(|op| {
-                if let WriteOperation::UpdateOne { filter: existing_filter, .. } = op {
-                    BatchUpdateBuilder::<T>::documents_equal(existing_filter, &filter)
-                } else {
-                    false
-                }
-            })
-            .map(|index| self.builder.operations.remove(index));
-
-        match existing_update {
-            Some(WriteOperation::UpdateOne { updates, upsert, .. }) => {
-                Self {
-                                builder: self.builder,
-                                current_filter: filter,
-                                current_updates: updates,
-                                is_upsert: upsert,
-                }
-            }
-            _ => Self {
-                        builder: self.builder,
-                        current_filter: filter,
-                        current_updates: Vec::new(),
-                        is_upsert: false,
-                }
-        }
-    }
-
-    pub fn build(mut self) -> BatchUpdateBuilder<T> {
-        if !self.current_updates.is_empty() {
-            self.builder.operations.push(WriteOperation::UpdateOne {
-                filter: self.current_filter,
-                updates: self.current_updates,
-                upsert: self.is_upsert,
-            });
-        }
-        self.builder
     }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mongodb::{Client, bson::doc};
+    use crate::models::order::Order;
 
-    async fn get_test_collection() -> Collection<Document> {
+    async fn get_test_collection() -> Collection<Order> {
         let client = Client::with_uri_str("mongodb://localhost:27017").await.unwrap();
         client.database("test").collection("test_collection")
     }
@@ -855,16 +883,16 @@ mod tests {
     #[tokio::test]
     async fn test_different_update_types_same_filter() {
         let collection = get_test_collection().await;
-        let builder = BatchUpdateBuilder::new(collection);
+        let mut builder: BatchUpdateBuilder<Order> = BatchUpdateBuilder::new(collection);
         let filter = doc! { "id": 1 };
 
-        let context = builder.add_update(filter.clone())
-            .set(doc! { "name": "test1" })
-            .inc(doc! { "count": 1 })
-            .build();
+        builder.add_update(filter.clone())
+                        .set(doc! { "name": "test1" })
+                        .inc(doc! { "count": 1 });
+                        //.build();
 
-        assert_eq!(context.operations.len(), 1);
-        if let WriteOperation::UpdateOne { updates, .. } = &context.operations[0] {
+        assert_eq!(builder.operations.len(), 1);
+        if let WriteOperation::UpdateOne { updates, .. } = &builder.operations[0] {
             assert_eq!(updates.len(), 2);
             match (&updates[0], &updates[1]) {
                 (UpdateType::Set(set_doc), UpdateType::Inc(inc_doc)) => {
@@ -881,17 +909,16 @@ mod tests {
     #[tokio::test]
     async fn test_merge_same_update_type_and_filter() {
         let collection = get_test_collection().await;
-        let builder = BatchUpdateBuilder::new(collection);
+        let mut builder: BatchUpdateBuilder<Order> = BatchUpdateBuilder::new(collection);
         let filter = doc! { "id": 1 };
 
-        let context = builder.add_update(filter.clone())
+        builder.add_update(filter.clone())
             .set(doc! { "name": "test1" })
-            .next_update(filter.clone())
-            .set(doc! { "age": 20 })
-            .build();
+            .set(doc! { "age": 20 });
+            //.build();
 
-        assert_eq!(context.operations.len(), 1);
-        if let WriteOperation::UpdateOne { updates, .. } = &context.operations[0] {
+        assert_eq!(builder.operations.len(), 1);
+        if let WriteOperation::UpdateOne { updates, .. } = &builder.operations[0] {
             assert_eq!(updates.len(), 1);
             if let UpdateType::Set(doc) = &updates[0] {
                 assert_eq!(doc.get("name").unwrap().as_str().unwrap(), "test1");
@@ -907,44 +934,45 @@ mod tests {
     #[tokio::test]
     async fn test_different_filters_no_merge() {
         let collection = get_test_collection().await;
-        let builder = BatchUpdateBuilder::new(collection);
+        let mut builder: BatchUpdateBuilder<Order> = BatchUpdateBuilder::new(collection);
         
-        let context = builder.add_update(doc! { "id": 1 })
+        builder.add_update(doc! { "id": 1 })
             .set(doc! { "name": "test1" })
-            .next_update(doc! { "id": 2 })
-            .set(doc! { "name": "test2" })
-            .build();
+            //.build()
+            .add_update(doc! { "id": 2 })
+            .set(doc! { "name": "test2" });
+            //.build();
 
-        assert_eq!(context.operations.len(), 2);
+        assert_eq!(builder.operations.len(), 2);
     }
 
     #[tokio::test]
     async fn test_mixed_operations() {
         let collection = get_test_collection().await;
-        let builder = BatchUpdateBuilder::new(collection);
+        let mut builder: BatchUpdateBuilder<Order> = BatchUpdateBuilder::new(collection);
         
-        let context = builder.add_update(doc! { "id": 1 })
+        builder.add_update(doc! { "id": 1 })
             .set(doc! { "name": "test1" })
-            .build()
-            .add_update(doc! { "id": 2 })
-            .delete()
+            //.build()
+            //.add_update(doc! { "id": 2 })
+            .delete(doc! { "id": 2 })
             .add_update(doc! { "id": 3 })
-            .set(doc! { "name": "test3" })
-            .build();
+            .set(doc! { "name": "test3" }); 
+            //.build();
 
-        assert_eq!(context.operations.len(), 3);
+        assert_eq!(builder.operations.len(), 3);
         
-        match &context.operations[0] {
+        match &builder.operations[0] {
             WriteOperation::UpdateOne { .. } => (),
             _ => panic!("Expected UpdateOne operation")
         }
         
-        match &context.operations[1] {
+        match &builder.operations[1] {
             WriteOperation::DeleteOne { .. } => (),
             _ => panic!("Expected DeleteOne operation")
         }
         
-        match &context.operations[2] {
+        match &builder.operations[2] {
             WriteOperation::UpdateOne { .. } => (),
             _ => panic!("Expected UpdateOne operation")
         }
