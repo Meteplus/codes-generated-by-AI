@@ -786,7 +786,7 @@ where
         最终的 write_models 只包含有效的操作
         这是一个安全的实现，可以防止意外的全表更新或删除操作。
      */
-    pub fn execute(&mut self) -> BulkWrite<SummaryBulkWriteResult> {
+    pub async fn execute(&mut self) -> Result<SummaryBulkWriteResult, mongodb::error::Error> {
         self.build();
         // 原有的 execute 实现保持不变
         let write_models: Vec<WriteModel> = self.operations.iter()
@@ -844,8 +844,34 @@ where
                 },
             })
             .collect();
-
-        self.collection.client().bulk_write(write_models)
+        // Print all database operations before executing
+        println!("Executing database operations:");
+        for (i, op) in self.operations.iter().enumerate() {
+            match op {
+                WriteOperation::UpdateOne { filter, updates, upsert } => {
+                    println!("Operation {}: UpdateOne", i);
+                    println!("  Filter: {:?}", filter);
+                    println!("  Updates: {:?}", updates);
+                    println!("  Upsert: {:?}", upsert);
+                },
+                WriteOperation::DeleteOne { filter } => {
+                    println!("Operation {}: DeleteOne", i);
+                    println!("  Filter: {:?}", filter);
+                },
+                WriteOperation::DeleteMany { filter } => {
+                    println!("Operation {}: DeleteMany", i);
+                    println!("  Filter: {:?}", filter);
+                },
+                WriteOperation::InsertOne { document } => {
+                    println!("Operation {}: InsertOne", i);
+                    //println!("  Document: {:?}", document);
+                }
+            }
+        }
+        println!("write_models>>>>{:?}",write_models);
+        let result = self.collection.client().bulk_write(write_models).await;
+        println!("result>>>>{:?}",result);
+        result
     }
   
 }
