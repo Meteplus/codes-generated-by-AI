@@ -513,12 +513,34 @@ impl UpdateType {
             UpdateType::Unset(doc) => doc! { "$unset": doc },
             UpdateType::SetOnInsert(doc) => doc! { "$setOnInsert": doc },
             UpdateType::Push(doc) => doc! { "$push": doc },
-            UpdateType::PushEach(doc) => doc! { "$push": doc },
+            UpdateType::PushEach(doc) => {
+                let mut transformed_doc = Document::new();
+                for (k, v) in doc.iter() {
+                    let new_doc = match v {
+                        Bson::Document(d) if d.contains_key("$each") => d.clone(),
+                        Bson::Array(arr) => doc! { "$each": arr },
+                        other => doc! { "$each": [other.clone()] },
+                    };
+                    transformed_doc.insert(k, Bson::Document(new_doc));
+                }
+                doc! { "$push": transformed_doc }
+            },
             UpdateType::Pull(doc) => doc! { "$pull": doc },
             UpdateType::PullAll(doc) => doc! { "$pullAll": doc },
             UpdateType::Pop(doc) => doc! { "$pop": doc },
             UpdateType::AddToSet(doc) => doc! { "$addToSet": doc },
-            UpdateType::AddToSetEach(doc) => doc! { "$addToSet": doc },
+            UpdateType::AddToSetEach(doc) => {
+                let mut transformed_doc = Document::new();
+                for (k, v) in doc.iter() {
+                    let new_doc = match v {
+                        Bson::Document(d) if d.contains_key("$each") => d.clone(),
+                        Bson::Array(arr) => doc! { "$each": arr },
+                        other => doc! { "$each": [other.clone()] },
+                    };
+                    transformed_doc.insert(k, Bson::Document(new_doc));
+                }
+                doc! { "$addToSet": transformed_doc }
+            },
             UpdateType::Inc(doc) => doc! { "$inc": doc },
             UpdateType::Mul(doc) => doc! { "$mul": doc },
             UpdateType::Min(doc) => doc! { "$min": doc },
@@ -594,6 +616,10 @@ where
     }
 
     pub fn add_update(&mut self, filter: Document) -> &mut Self {
+        self.add_upsert(filter,false)
+    }
+
+    pub fn add_upsert(&mut self, filter: Document,upsert: bool) -> &mut Self {
         // 提交当前上下文
         self.commit_context();
 
@@ -618,7 +644,7 @@ where
             _ => BatchUpdateContext {
                 filter,
                 updates: Vec::new(),
-                is_upsert: false,
+                is_upsert: upsert,
             }
         });
 
@@ -788,6 +814,8 @@ where
      */
     pub async fn execute(&mut self) -> Result<SummaryBulkWriteResult, mongodb::error::Error> {
         self.build();
+
+        println!("mongodb_bulk_writer_builder>>>>begin to execute...");
         // 原有的 execute 实现保持不变
         let write_models: Vec<WriteModel> = self.operations.iter()
             .filter_map(|operation| match operation {
