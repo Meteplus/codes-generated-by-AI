@@ -33,8 +33,9 @@ use mongodb::{
     Collection,
     options::{WriteModel, UpdateOneModel, DeleteOneModel, 
         DeleteManyModel, InsertOneModel, UpdateModifications},
-    action::BulkWrite,
-    results::SummaryBulkWriteResult
+    results::SummaryBulkWriteResult,
+    error::Error,
+    error::ErrorKind,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -812,7 +813,7 @@ where
         最终的 write_models 只包含有效的操作
         这是一个安全的实现，可以防止意外的全表更新或删除操作。
      */
-    pub async fn execute(&mut self) -> Result<SummaryBulkWriteResult, mongodb::error::Error> {
+    pub async fn execute(&mut self) -> Result<SummaryBulkWriteResult, Error> {
         self.build();
 
         println!("mongodb_bulk_writer_builder>>>>begin to execute...");
@@ -897,6 +898,9 @@ where
             }
         }
         println!("write_models>>>>{:?}",write_models);
+        if write_models.is_empty(){ 
+            return Ok(SummaryBulkWriteResult::default());
+        }
         let result = self.collection.client().bulk_write(write_models).await;
         println!("result>>>>{:?}",result);
         result
